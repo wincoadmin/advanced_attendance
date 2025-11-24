@@ -155,8 +155,9 @@ class ZKTecoConnector:
             
             synced_count = 0
             errors = []
+            BATCH_SIZE = 100  # Commit every 100 records
             
-            for log in logs:
+            for i, log in enumerate(logs):
                 try:
                     # Map user_id to employee
                     employee = frappe.db.get_value(
@@ -197,10 +198,17 @@ class ZKTecoConnector:
                         })
                         checkin.insert(ignore_permissions=True)
                         synced_count += 1
+                    
+                    # Batch commit every BATCH_SIZE records
+                    if (i + 1) % BATCH_SIZE == 0:
+                        frappe.db.commit()
+                        frappe.logger().info(f"Batch committed: {i + 1} records processed")
                 
                 except Exception as e:
-                    errors.append(f"Error processing log: {str(e)}")
+                    errors.append(f"Error processing log {i}: {str(e)}")
+                    frappe.log_error(str(e), f"Sync Log Error - Device {device_ip}")
             
+            # Final commit for remaining records
             frappe.db.commit()
             
             return {
@@ -243,13 +251,60 @@ def sync_all_devices():
     Returns:
         dict: Combined sync results
     """
-    # Get all configured devices from settings or custom DocType
-    # For now, return placeholder
-    return {
-        'success': True,
-        'message': 'No devices configured. Please configure devices in Biometric Device Settings.',
-        'devices_synced': 0
-    }
+    try:
+        # Get all enabled devices
+        devices = frappe.get_all(
+            'Biometric Device Settings',
+            filters={'enabled': 1},
+            fields=['name', 'device_ip', 'device_port']
+        )
+        
+        if not devices:
+            return {
+                'success': True,
+                'message': 'No enabled devices found. Please configure and enable devices in Biometric Device Settings.',
+                'devices_synced': 0
+            }
+        
+        results = []
+        total_synced = 0
+        errors = []
+        
+        for device in devices:
+            try:
+                result = ZKTecoConnector.sync_device(device.device_ip, device.device_port)
+                results.append({
+                    'device': device.name,
+                    'ip': device.device_ip,
+                    'result': result
+                })
+                
+                if result.get('success'):
+                    total_synced += result.get('synced', 0)
+                else:
+                    errors.append(f"{device.name}: {result.get('message', 'Unknown error')}")
+                    
+            except Exception as e:
+                error_msg = f"{device.name}: {str(e)}"
+                errors.append(error_msg)
+                frappe.log_error(frappe.get_traceback(), f"Sync failed for {device.name}")
+        
+        return {
+            'success': True,
+            'message': f'Synced {total_synced} records from {len(devices)} device(s)',
+            'devices_synced': len(devices),
+            'total_records': total_synced,
+            'results': results,
+            'errors': errors if errors else None
+        }
+        
+    except Exception as e:
+        frappe.log_error(frappe.get_traceback(), "Sync All Devices Failed")
+        return {
+            'success': False,
+            'message': f'Error syncing devices: {str(e)}',
+            'devices_synced': 0
+        }
 
 
 @frappe.whitelist()
